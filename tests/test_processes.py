@@ -278,3 +278,51 @@ def test_scaffold_species_reset_between_runs_does_not_carry_stale_state(core, sc
         config={'model_file': scaffold_chain_model_path, 'n_steps': 20},
         core=core)
     assert proc_b.initial_state()['scaffold_species'] == {}
+
+
+def _seeded_chunk(core, model_file, seed, interval=5.0):
+    """Run one fresh NFSimProcess chunk from the same starting state."""
+    config = {'model_file': model_file, 'n_steps': 20}
+    if seed is not None:
+        config['seed'] = seed
+    proc = NFSimProcess(config=config, core=core)
+    state = proc.initial_state()
+    state['observables']['FreeA'] = 200.0
+    return proc.update(state, interval)
+
+
+def test_seed_makes_runs_reproducible(core, scaffold_chain_model_path):
+    """Regression: the seed was dropped from the NFsim simulate action, so
+    identical configurations produced different trajectories. The same seed
+    must now give identical output, and a different seed must differ."""
+    first = _seeded_chunk(core, scaffold_chain_model_path, seed=42)
+    second = _seeded_chunk(core, scaffold_chain_model_path, seed=42)
+    other = _seeded_chunk(core, scaffold_chain_model_path, seed=7)
+
+    assert first == second
+    assert first != other
+
+
+def test_missing_observable_raises(core, model_path, monkeypatch):
+    """Regression: an observable absent from NFsim's output used to default
+    to 0.0, silently wiping that species. It must raise instead. NFsim's
+    output is replaced with a single-column table, the only way to make a
+    named observable go missing without depending on NFsim internals."""
+    import numpy as np
+    import pbg_nfsim.processes as processes
+
+    proc = NFSimProcess(
+        config={'model_file': model_path, 'n_steps': 10},
+        core=core)
+    gdat = np.zeros(2, dtype=[('time', 'f8'), (proc.observable_names[0], 'f8')])
+
+    class _FakeResult(dict):
+        pass
+
+    result = _FakeResult({'model': gdat})
+    monkeypatch.setattr(processes.bionetgen, 'run', lambda *a, **k: result)
+
+    state = proc.initial_state()
+    state['observables'][proc.observable_names[1]] = 5.0
+    with pytest.raises(RuntimeError, match=proc.observable_names[1]):
+        proc.update(state, 1.0)

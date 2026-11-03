@@ -106,6 +106,12 @@ class NFSimProcess(Process):
     from the current state before each run, allowing composition with
     other processes.
 
+    Reproducibility: ``seed`` (default None) is passed to NFsim as
+    ``seed=>`` in the simulate action. Each update() call starts NFsim with
+    that seed again, so a chunked run with one fixed seed restarts the RNG
+    every interval and its chunks are correlated. Vary the seed per run,
+    not per interval.
+
     Observables whose molecule types have no internal states (simple
     molecules) are "seedable" -- their counts carry over between steps.
 
@@ -141,6 +147,11 @@ class NFSimProcess(Process):
         'n_steps': {
             '_type': 'integer',
             '_default': 100,
+        },
+        # NFsim RNG seed (None = unseeded). See the class docstring.
+        'seed': {
+            '_type': 'maybe[integer]',
+            '_default': None,
         },
     }
 
@@ -289,10 +300,14 @@ class NFSimProcess(Process):
                 '\n'.join(extra_seeds) + '\nend seed species')
 
         # Append simulate action
+        # .get, not []: process-bigraph 1.9.1 does not fill a maybe[...] default
+        # into self.config when the key is omitted.
+        seed = self.config.get('seed')
+        seed_arg = '' if seed is None else f',seed=>{int(seed)}'
         bngl_text += (
             f'\nsimulate({{method=>"nf",'
             f't_end=>{interval},'
-            f'n_steps=>{self.config["n_steps"]}}});\n'
+            f'n_steps=>{self.config["n_steps"]}{seed_arg}}});\n'
         )
 
         # Run NFSim
@@ -314,8 +329,12 @@ class NFSimProcess(Process):
         # Compute observable deltas (unchanged from before this fix)
         deltas = {}
         for name in self.observable_names:
+            if name not in gdat.dtype.names:
+                raise RuntimeError(
+                    f'NFsim output has no column for observable {name!r}; '
+                    'refusing to treat it as zero')
             initial = current.get(name, 0)
-            final = float(gdat[name][-1]) if name in gdat.dtype.names else 0.0
+            final = float(gdat[name][-1])
             deltas[name] = final - initial
 
         # New scaffold_species snapshot: every final-species entry whose

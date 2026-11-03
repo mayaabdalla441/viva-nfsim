@@ -4,21 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "viva-nfsim"
-version = "0.1.0"
+version = "0.2.0"
 description = "Process-bigraph wrapper for BioNetGen/NFSim rule-based simulations"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "process-bigraph>=0.0.10",
+    "process-bigraph>=1.9.1",
     "bigraph-schema",
-    "viva-superpowers",
-    "bionetgen",
+    "bionetgen==0.8.7",
     "numpy",
     "matplotlib",
     "pyyaml",
 ]
 
 [project.optional-dependencies]
+# Dashboard visualizations (FlagellaAssemblyPlots). Not needed for simulation.
+dashboard = ["viva-superpowers"]
 dev = ["pytest", "bigraph-viz"]
 
 [tool.uv.sources]
@@ -26,3 +27,6 @@ viva-superpowers = { git = "https://github.com/vivarium-collective/viva-superpow
 
 [tool.setuptools.packages.find]
 include = ["pbg_nfsim*"]
+
+[tool.setuptools.package-data]
+pbg_nfsim = ["models/*.bngl", "composites/*.composite.yaml"]

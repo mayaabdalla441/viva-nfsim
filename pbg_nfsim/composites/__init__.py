@@ -18,6 +18,7 @@ Two flavors of composite construction live in this package:
 Both flavors are equivalent — pick the one that fits your use case.
 """
 from __future__ import annotations
+import importlib.util
 import re
 from pathlib import Path
 from typing import Any
@@ -169,7 +170,8 @@ def make_production_document(
 
 def register_nfsim(core=None):
     """Return a core with NFSimProcess, MonomerProduction, the RAM emitter,
-    and the flagella-assembly Visualization Step registered."""
+    and, when viva-superpowers is installed (`dashboard` extra), the
+    flagella-assembly Visualization Step registered."""
     if core is None:
         core = allocate_core()
     core.register_link('NFSimProcess', NFSimProcess)
@@ -179,13 +181,20 @@ def register_nfsim(core=None):
     core.register_link('RAMEmitter', RAMEmitter)
     core.register_link('ram-emitter', RAMEmitter)
     # Register Visualization Steps so composites can wire them by name.
+    # viva-superpowers is the optional `dashboard` extra. Skip only when it
+    # is missing; any other missing module is a real error and must surface.
     try:
         from pbg_nfsim.visualizations import FlagellaAssemblyPlots
+    except ModuleNotFoundError as exc:
+        # find_spec returns None when the package is absent or blocked in
+        # sys.modules; an installed package with a missing submodule must raise.
+        viva_absent = importlib.util.find_spec('viva_superpowers') is None
+        if not (viva_absent and (exc.name or '').startswith('viva_superpowers')):
+            raise
+        # viva-superpowers not installed: viz composites are unavailable,
+        # the rest of the package works.
+    else:
         core.register_link('FlagellaAssemblyPlots', FlagellaAssemblyPlots)
-    except ImportError:
-        # viva-superpowers not installed; viz composites won't work but
-        # the rest of the package still does.
-        pass
     return core
 
 
