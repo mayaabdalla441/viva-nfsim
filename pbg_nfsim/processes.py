@@ -106,11 +106,11 @@ class NFSimProcess(Process):
     from the current state before each run, allowing composition with
     other processes.
 
-    Reproducibility: ``seed`` (default None) is passed to NFsim as
-    ``seed=>`` in the simulate action. Each update() call starts NFsim with
-    that seed again, so a chunked run with one fixed seed restarts the RNG
-    every interval and its chunks are correlated. Vary the seed per run,
-    not per interval.
+    Reproducibility: ``seed`` (default None = unseeded) is a BASE seed. Each
+    update() call passes NFsim ``seed=>(base + call index)``, so the same
+    base seed reproduces the same chunked trajectory, while successive
+    chunks use different random streams (not one stream restarted every
+    interval).
 
     Observables whose molecule types have no internal states (simple
     molecules) are "seedable" -- their counts carry over between steps.
@@ -148,7 +148,12 @@ class NFSimProcess(Process):
             '_type': 'integer',
             '_default': 100,
         },
-        # NFsim RNG seed (None = unseeded). See the class docstring.
+        # Base NFsim RNG seed (None = unseeded). Each update() call passes
+        # NFsim its own seed derived from this base and the call index (see
+        # update()), so a run is reproducible for a given base seed while
+        # successive chunks still use different random streams. (Merged
+        # 2026-11-10: upstream #7's maybe[integer]/None default kept; the
+        # per-call derivation is from 0278c8b.)
         'seed': {
             '_type': 'maybe[integer]',
             '_default': None,
@@ -158,6 +163,7 @@ class NFSimProcess(Process):
     def __init__(self, config=None, core=None):
         super().__init__(config, core)
         self.model_file = self.config['model_file']
+        self._call_count = 0
 
         # Read and store the BNGL template
         with open(self.model_file) as f:
@@ -192,6 +198,7 @@ class NFSimProcess(Process):
         return {
             'observables': {name: 0.0 for name in self.observable_names},
             'scaffold_species': {},
+            'gross_positive_deltas': {name: 0.0 for name in self.observable_names},
         }
 
     def inputs(self):
@@ -208,6 +215,25 @@ class NFSimProcess(Process):
                 name: 'float' for name in self.observable_names
             },
             'scaffold_species': 'overwrite[map[float]]',
+            # Added 2026-09-01: 'observables' is a NET delta over the whole
+            # chunk (final - initial), correct for real bulk-count updates
+            # but structurally blind to a species produced AND consumed
+            # within the same chunk -- confirmed real for fast intermediate
+            # stages (C-ring, export apparatus, motor complex), whose
+            # cumulative "ever formed" trackers read flat 0 despite real
+            # completions happening. NFsim already returns a full
+            # ~50-point time series per chunk (gdat), previously discarded
+            # down to just the last row. This port sums only the POSITIVE
+            # jumps between consecutive sub-steps -- catches a
+            # rise-then-fall within the chunk, down to sub-step (~1200s/
+            # n_steps) resolution instead of whole-chunk resolution. Not
+            # used for real bulk-count mass balance (that stays net-delta,
+            # correctly conservative) -- only for callers that want a true
+            # "how much was ever produced" count, like the cumulative
+            # trackers in flagella_nfsim_complexation.py.
+            'gross_positive_deltas': {
+                name: 'float' for name in self.observable_names
+            },
         }
 
     def _parse_species_file(self, path):
@@ -260,6 +286,7 @@ class NFSimProcess(Process):
             return {
                 'observables': {name: 0.0 for name in self.observable_names},
                 'scaffold_species': {},
+                'gross_positive_deltas': {name: 0.0 for name in self.observable_names},
             }
 
         # Build BNGL text with current state
@@ -299,11 +326,23 @@ class NFSimProcess(Process):
                 'end seed species',
                 '\n'.join(extra_seeds) + '\nend seed species')
 
-        # Append simulate action
+        # Append simulate action. With a base seed, each call gets
+        # seed=>(base + call index): reproducible per (base seed, call),
+        # but different call-to-call. Upstream #7 passed the SAME seed on
+        # every call, which restarts the RNG each chunk and correlates the
+        # chunks of a chunked run (its old docstring said so). Upstream
+        # version, kept for reference:
+        #   seed = self.config.get('seed')
+        #   seed_arg = '' if seed is None else f',seed=>{int(seed)}'
         # .get, not []: process-bigraph 1.9.1 does not fill a maybe[...] default
         # into self.config when the key is omitted.
         seed = self.config.get('seed')
-        seed_arg = '' if seed is None else f',seed=>{int(seed)}'
+        if seed is None:
+            seed_arg = ''
+        else:
+            call_seed = (int(seed) + self._call_count) & 0x7FFFFFFF
+            seed_arg = f',seed=>{call_seed}'
+        self._call_count += 1
         bngl_text += (
             f'\nsimulate({{method=>"nf",'
             f't_end=>{interval},'
@@ -326,15 +365,28 @@ class NFSimProcess(Process):
             species_path = os.path.join(tmpdir, f'{self._model_basename}.species')
             final_species = self._parse_species_file(species_path)
 
-        # Compute observable deltas (unchanged from before this fix)
+        # Compute observable deltas (unchanged from before this fix) --
+        # net change over the whole chunk, used for real bulk-count mass
+        # balance. Correct for that purpose; NOT a "how much was ever
+        # produced" count (see gross_positive_deltas below).
         deltas = {}
+        # Gross positive-jump sum across the chunk's own sub-steps (added
+        # 2026-09-01, see outputs()) -- separate from deltas above.
+        gross_positive = {}
         for name in self.observable_names:
             if name not in gdat.dtype.names:
                 raise RuntimeError(
                     f'NFsim output has no column for observable {name!r}; '
                     'refusing to treat it as zero')
             initial = current.get(name, 0)
-            final = float(gdat[name][-1])
+            # Column presence is already enforced by the raise above
+            # (upstream #7), so no 0.0 fallback here (0278c8b had one).
+            series = gdat[name]
+            final = float(series[-1])
+            gross_positive[name] = float(sum(
+                max(0.0, float(series[k + 1]) - float(series[k]))
+                for k in range(len(series) - 1)
+            ))
             deltas[name] = final - initial
 
         # New scaffold_species snapshot: every final-species entry whose
@@ -352,6 +404,7 @@ class NFSimProcess(Process):
         return {
             'observables': deltas,
             'scaffold_species': new_scaffold,
+            'gross_positive_deltas': gross_positive,
         }
 
 

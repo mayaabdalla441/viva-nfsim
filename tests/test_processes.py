@@ -326,3 +326,38 @@ def test_missing_observable_raises(core, model_path, monkeypatch):
     state['observables'][proc.observable_names[1]] = 5.0
     with pytest.raises(RuntimeError, match=proc.observable_names[1]):
         proc.update(state, 1.0)
+
+
+def _two_chunks(core, model_file, seed, interval=5.0):
+    """Two successive update() calls on ONE process from the same state."""
+    proc = NFSimProcess(
+        config={'model_file': model_file, 'n_steps': 20, 'seed': seed},
+        core=core)
+    out = []
+    for _ in range(2):
+        state = proc.initial_state()
+        state['observables']['FreeA'] = 200.0
+        out.append(proc.update(state, interval))
+    return out
+
+
+def test_seed_varies_per_call_but_reproduces_per_run(core, scaffold_chain_model_path):
+    """Regression (merged 2026-11-10): one fixed seed on every call restarted
+    the RNG each chunk, so identical chunk inputs gave identical outputs and
+    a chunked run's chunks were correlated. Each call now derives its own
+    seed (base + call index): chunk 2 differs from chunk 1 given the same
+    input, and a fresh process with the same base seed reproduces both."""
+    run1 = _two_chunks(core, scaffold_chain_model_path, seed=42)
+    run2 = _two_chunks(core, scaffold_chain_model_path, seed=42)
+    assert run1 == run2
+    assert run1[0] != run1[1]
+
+
+def test_gross_positive_deltas_reported(core, scaffold_chain_model_path):
+    """gross_positive_deltas sums positive jumps within the chunk, so it is
+    >= max(net delta, 0) for every observable."""
+    out = _seeded_chunk(core, scaffold_chain_model_path, seed=3)
+    gross = out['gross_positive_deltas']
+    assert set(gross) == set(out['observables'])
+    for name, net in out['observables'].items():
+        assert gross[name] >= max(net, 0.0) - 1e-9
